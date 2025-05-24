@@ -721,13 +721,13 @@ public final class HlsMediaSource extends BaseMediaSource
   private void updateLiveConfiguration(HlsMediaPlaylist playlist, long targetLiveOffsetUs) {
     List<HlsMediaPlaylist.Segment> segments = playlist.segments;
     int segmentLen = segments.size();
-    long lowestTargetMs = Util.usToMs(segments.get(Math.max(0, segmentLen - 1)).durationUs);
+    long lowestTargetMs = Util.usToMs(segments.get(Math.max(0, segmentLen - 1)).durationUs);//one segment size
 
     long targetMs = lowestTargetMs * (segmentLen / 2);
     
     if (LowLatency == 1) {
     	targetMs = lowestTargetMs + 250;//lowest then this and we get too much rebuffers
-    } else if (LowLatency == 2) {
+    } else if (LowLatency == 2) {//live that has low latency enabled, or VOD that the live has not yet ended
     	targetMs = lowestTargetMs * 2;
     }
     
