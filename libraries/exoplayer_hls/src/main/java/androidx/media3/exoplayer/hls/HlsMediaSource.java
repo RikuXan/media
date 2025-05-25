@@ -727,8 +727,8 @@ public final class HlsMediaSource extends BaseMediaSource
     
     if (LowLatency == 1) {
     	targetMs = lowestTargetMs + 250;//lowest then this and we get too much rebuffers
-    } else if (LowLatency == 2) {//live that has low latency enabled, or VOD that the live has not yet ended
-    	targetMs = lowestTargetMs * 2;
+    } else if (LowLatency > 1) {//live that has low latency enabled, or VOD that the live has not yet ended
+    	targetMs = lowestTargetMs * LowLatency;
     }
     
     liveConfiguration =
