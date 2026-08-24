@@ -23,15 +23,26 @@ import androidx.media3.exoplayer.upstream.ParsingLoadable;
 @UnstableApi
 public final class DefaultHlsPlaylistParserFactory implements HlsPlaylistParserFactory {
 
+  private final boolean parseTwitchPrefetchSegments;
+
+  public DefaultHlsPlaylistParserFactory() {
+    this(false);
+  }
+
+  public DefaultHlsPlaylistParserFactory(boolean parseTwitchPrefetchSegments) {
+    this.parseTwitchPrefetchSegments = parseTwitchPrefetchSegments;
+  }
+
   @Override
   public ParsingLoadable.Parser<HlsPlaylist> createPlaylistParser() {
-    return new HlsPlaylistParser();
+    return new HlsPlaylistParser(parseTwitchPrefetchSegments);
   }
 
   @Override
   public ParsingLoadable.Parser<HlsPlaylist> createPlaylistParser(
       HlsMultivariantPlaylist multivariantPlaylist,
       @Nullable HlsMediaPlaylist previousMediaPlaylist) {
-    return new HlsPlaylistParser(multivariantPlaylist, previousMediaPlaylist);
+    return new HlsPlaylistParser(
+        multivariantPlaylist, previousMediaPlaylist, parseTwitchPrefetchSegments);
   }
 }
