@@ -427,9 +427,10 @@ public final class DefaultLivePlaybackSpeedControl implements LivePlaybackSpeedC
   }
 
   private void adjustTargetLiveOffsetUs(long liveOffsetUs) {
-    // Stay in a safe distance (3 standard deviations = >99%) to the minimum possible live offset.
+    // Stay in a safe distance (2 standard deviations = >95%) to the minimum possible live offset.
+    // Twitch prefetch playback keeps a tiny jumpy buffer, 3 deviations inflates the target too much
     long safeOffsetUs =
-        smoothedMinPossibleLiveOffsetUs + 3 * smoothedMinPossibleLiveOffsetDeviationUs;
+        smoothedMinPossibleLiveOffsetUs + 2 * smoothedMinPossibleLiveOffsetDeviationUs;
     if (currentTargetLiveOffsetUs > safeOffsetUs) {
       // There is room for decreasing the target offset towards the ideal or safe offset (whichever
       // is larger). We want to limit the decrease so that the playback speed delta we achieve is
