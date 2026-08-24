@@ -66,6 +66,8 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.Target;
 import java.util.List;
 import java.util.Objects;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** An HLS {@link MediaSource}. */
 @UnstableApi
@@ -302,6 +304,10 @@ public final class HlsMediaSource extends BaseMediaSource
     
     public Factory setLowLatency(int LowLatency) {
       this.LowLatency = LowLatency;
+      //LowLatency 1 plays Twitch in-progress (prefetch) segments, the parser must emit them
+      if (LowLatency == 1) {
+        this.playlistParserFactory = new DefaultHlsPlaylistParserFactory(true);
+      }
       return this;
     }
     
@@ -476,6 +482,8 @@ public final class HlsMediaSource extends BaseMediaSource
   private final long timestampAdjusterInitializationTimeoutMs;
 
   private MediaItem.LiveConfiguration liveConfiguration;
+  private long twitchEpochOffsetMs = C.TIME_UNSET;
+  private long lastTwitchServerTimeMs = C.TIME_UNSET;
   @Nullable private TransferListener mediaTransferListener;
 
   @GuardedBy("this")
@@ -593,6 +601,7 @@ public final class HlsMediaSource extends BaseMediaSource
 
   @Override
   public void onPrimaryPlaylistRefreshed(HlsMediaPlaylist mediaPlaylist) {
+    updateTwitchEpochOffset(mediaPlaylist);
     long windowStartTimeMs =
         mediaPlaylist.hasProgramDateTime ? Util.usToMs(mediaPlaylist.startTimeUs) : C.TIME_UNSET;
     // For playlist types EVENT and VOD we know segments are never removed, so the presentation
@@ -645,7 +654,7 @@ public final class HlsMediaSource extends BaseMediaSource
     return new SinglePeriodTimeline(
         presentationStartTimeMs,
         windowStartTimeMs,
-        /* elapsedRealtimeEpochOffsetMs= */ C.TIME_UNSET,
+        /* elapsedRealtimeEpochOffsetMs= */ twitchEpochOffsetMs,
         periodDurationUs,
         /* windowDurationUs= */ playlist.durationUs,
         /* windowPositionInPeriodUs= */ offsetFromInitialStartTimeUs,
@@ -691,9 +700,44 @@ public final class HlsMediaSource extends BaseMediaSource
         /* liveConfiguration= */ null);
   }
 
+  private static final Pattern TWITCH_SERVER_TIME_PATTERN = Pattern.compile("X-SERVER-TIME=\"([0-9.]+)\"");
+
+  //Twitch stamps the playlist with its server clock, using it keeps the live offset immune to device clock skew.
+  //The stamp is the session creation time and repeats unchanged on every refresh, it is only fresh
+  //(within one round trip of now) on the refresh where its value first appears, so only capture then
+  private void updateTwitchEpochOffset(HlsMediaPlaylist playlist) {
+    for (int i = playlist.tags.size() - 1; i >= 0; i--) {
+      Matcher matcher = TWITCH_SERVER_TIME_PATTERN.matcher(playlist.tags.get(i));
+      if (matcher.find()) {
+        try {
+          long serverTimeMs = (long) (Double.parseDouble(matcher.group(1)) * 1000);
+          if (serverTimeMs != lastTwitchServerTimeMs) {
+            lastTwitchServerTimeMs = serverTimeMs;
+            twitchEpochOffsetMs = serverTimeMs - SystemClock.elapsedRealtime();
+          }
+        } catch (NumberFormatException e) {
+          //Keep the previous offset
+        }
+        return;
+      }
+    }
+  }
+
+  private static boolean hasTwitchPrefetch(HlsMediaPlaylist playlist) {
+    for (int i = playlist.tags.size() - 1; i >= 0; i--) {
+      if (playlist.tags.get(i).startsWith("#EXT-X-TWITCH-PREFETCH")) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private long getLiveEdgeOffsetUs(HlsMediaPlaylist playlist) {
     return playlist.hasProgramDateTime
-        ? Util.msToUs(Util.getNowUnixTimeMs(elapsedRealTimeOffsetMs)) - playlist.getEndTimeUs()
+        ? Util.msToUs(
+                Util.getNowUnixTimeMs(
+                    twitchEpochOffsetMs != C.TIME_UNSET ? twitchEpochOffsetMs : elapsedRealTimeOffsetMs))
+            - playlist.getEndTimeUs()
         : 0;
   }
 
@@ -710,9 +754,11 @@ public final class HlsMediaSource extends BaseMediaSource
     playlist.targetDurationUs = segments.get(Math.max(0, defaultStartSegmentIndex - 1)).durationUs / 2;
 
     //If LowLatency enable start from #2 segment (from #1 segment may cause rebuffer) else on half of segments
+    //With Twitch prefetch the last segment is still being encoded, starting on it stalls the join
+    int lastSegmentsToSkip = LowLatency == 1 && hasTwitchPrefetch(playlist) ? 2 : LowLatency;
     defaultStartSegmentIndex = Math.max(
         0,
-        LowLatency > 0 ? (defaultStartSegmentIndex - LowLatency) : (defaultStartSegmentIndex / 2)
+        LowLatency > 0 ? (defaultStartSegmentIndex - lastSegmentsToSkip) : (defaultStartSegmentIndex / 2)
     );
 
     return segments.get(defaultStartSegmentIndex).relativeStartTimeUs;
@@ -726,7 +772,7 @@ public final class HlsMediaSource extends BaseMediaSource
     long targetMs = lowestTargetMs * (segmentLen / 2);
     
     if (LowLatency == 1) {
-    	targetMs = lowestTargetMs + 250;//lowest then this and we get too much rebuffers
+    	targetMs = 750;//lower than this stutters, the encoder delivers in bursts that need absorbing
     } else if (LowLatency > 1) {//live that has low latency enabled, or VOD that the live has not yet ended
     	targetMs = lowestTargetMs * LowLatency;
     }
@@ -734,8 +780,13 @@ public final class HlsMediaSource extends BaseMediaSource
     liveConfiguration =
         new LiveConfiguration.Builder()
             .setTargetOffsetMs(targetMs)
-            .setMinPlaybackSpeed(speedAdjustment && LowLatency > 0 ? 0.99f : 1f)
-            .setMaxPlaybackSpeed(speedAdjustment && LowLatency > 0 ? 1.01f : 1f)
+            //Cap the target offset the speed control may ratchet up to, or latency grows unbounded over time.
+            //In the lowest mode the cap is tight, the Twitch web player pins itself this close and smooths
+            //shortfalls with a slight slowdown instead of retreating
+            .setMaxOffsetMs(targetMs + (LowLatency == 1 ? 500 : lowestTargetMs))
+            //A slowdown below 1f is only safe because of the cap above, an uncapped target made latency grow
+            .setMinPlaybackSpeed(speedAdjustment && LowLatency == 1 ? 0.97f : 1f)
+            .setMaxPlaybackSpeed(speedAdjustment && LowLatency > 0 ? 1.05f : 1f)
             .build();
   }
 

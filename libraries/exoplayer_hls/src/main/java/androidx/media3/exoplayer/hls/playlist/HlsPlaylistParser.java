@@ -105,6 +105,7 @@ public final class HlsPlaylistParser implements ParsingLoadable.Parser<HlsPlayli
   private static final String TAG_MEDIA_SEQUENCE = "#EXT-X-MEDIA-SEQUENCE";
   private static final String TAG_START = "#EXT-X-START";
   private static final String TAG_ENDLIST = "#EXT-X-ENDLIST";
+  private static final String TAG_TWITCH_PREFETCH = "#EXT-X-TWITCH-PREFETCH";
   private static final String TAG_KEY = "#EXT-X-KEY";
   private static final String TAG_SESSION_KEY = "#EXT-X-SESSION-KEY";
   private static final String TAG_BYTERANGE = "#EXT-X-BYTERANGE";
@@ -293,13 +294,18 @@ public final class HlsPlaylistParser implements ParsingLoadable.Parser<HlsPlayli
 
   private final HlsMultivariantPlaylist multivariantPlaylist;
   @Nullable private final HlsMediaPlaylist previousMediaPlaylist;
+  private final boolean parseTwitchPrefetchSegments;
 
   /**
    * Creates an instance where media playlists are parsed without inheriting attributes from a
    * multivariant playlist.
    */
   public HlsPlaylistParser() {
-    this(HlsMultivariantPlaylist.EMPTY, /* previousMediaPlaylist= */ null);
+    this(HlsMultivariantPlaylist.EMPTY, /* previousMediaPlaylist= */ null, false);
+  }
+
+  public HlsPlaylistParser(boolean parseTwitchPrefetchSegments) {
+    this(HlsMultivariantPlaylist.EMPTY, /* previousMediaPlaylist= */ null, parseTwitchPrefetchSegments);
   }
 
   /**
@@ -314,8 +320,16 @@ public final class HlsPlaylistParser implements ParsingLoadable.Parser<HlsPlayli
   public HlsPlaylistParser(
       HlsMultivariantPlaylist multivariantPlaylist,
       @Nullable HlsMediaPlaylist previousMediaPlaylist) {
+    this(multivariantPlaylist, previousMediaPlaylist, false);
+  }
+
+  public HlsPlaylistParser(
+      HlsMultivariantPlaylist multivariantPlaylist,
+      @Nullable HlsMediaPlaylist previousMediaPlaylist,
+      boolean parseTwitchPrefetchSegments) {
     this.multivariantPlaylist = multivariantPlaylist;
     this.previousMediaPlaylist = previousMediaPlaylist;
+    this.parseTwitchPrefetchSegments = parseTwitchPrefetchSegments;
   }
 
   @Override
@@ -348,7 +362,8 @@ public final class HlsPlaylistParser implements ParsingLoadable.Parser<HlsPlayli
               multivariantPlaylist,
               previousMediaPlaylist,
               new LineIterator(extraLines, reader),
-              uri.toString());
+              uri.toString(),
+              parseTwitchPrefetchSegments);
         } else {
           extraLines.add(line);
         }
@@ -746,7 +761,8 @@ public final class HlsPlaylistParser implements ParsingLoadable.Parser<HlsPlayli
       HlsMultivariantPlaylist multivariantPlaylist,
       @Nullable HlsMediaPlaylist previousMediaPlaylist,
       LineIterator iterator,
-      String baseUri)
+      String baseUri,
+      boolean parseTwitchPrefetchSegments)
       throws IOException {
     @HlsMediaPlaylist.PlaylistType int playlistType = HlsMediaPlaylist.PLAYLIST_TYPE_UNKNOWN;
     long startOffsetUs = C.TIME_UNSET;
@@ -761,6 +777,7 @@ public final class HlsPlaylistParser implements ParsingLoadable.Parser<HlsPlayli
     HashMap<String, Segment> urlToInferredInitSegment = new HashMap<>();
     List<Segment> segments = new ArrayList<>();
     List<Part> trailingParts = new ArrayList<>();
+    List<String> twitchPrefetchUrls = new ArrayList<>();
     @Nullable Part preloadPart = null;
     List<RenditionReport> renditionReports = new ArrayList<>();
     List<String> tags = new ArrayList<>();
@@ -970,6 +987,10 @@ public final class HlsPlaylistParser implements ParsingLoadable.Parser<HlsPlayli
         hasIndependentSegmentsTag = true;
       } else if (line.equals(TAG_ENDLIST)) {
         hasEndTag = true;
+      } else if (line.startsWith(TAG_TWITCH_PREFETCH)) {
+        if (parseTwitchPrefetchSegments) {
+          twitchPrefetchUrls.add(line.substring(line.indexOf(':') + 1));
+        }
       } else if (line.startsWith(TAG_RENDITION_REPORT)) {
         long lastMediaSequence = parseOptionalLongAttr(line, REGEX_LAST_MSN, C.INDEX_UNSET);
         int lastPartIndex = parseOptionalIntAttr(line, REGEX_LAST_PART, C.INDEX_UNSET);
@@ -1309,6 +1330,34 @@ public final class HlsPlaylistParser implements ParsingLoadable.Parser<HlsPlayli
         }
         segmentByteRangeLength = C.LENGTH_UNSET;
         hasGapTag = false;
+      }
+    }
+
+    if (!hasEndTag && !twitchPrefetchUrls.isEmpty() && !segments.isEmpty()) {
+      //In-progress segments carry no EXTINF yet, assume they last as long as the newest complete one
+      long prefetchDurationUs = Iterables.getLast(segments).durationUs;
+      for (int i = 0; i < twitchPrefetchUrls.size(); i++) {
+        @Nullable
+        String prefetchEncryptionIV =
+            getSegmentEncryptionIV(
+                segmentMediaSequence, fullSegmentEncryptionKeyUri, fullSegmentEncryptionIV);
+        segmentMediaSequence++;
+        segments.add(
+            new Segment(
+                twitchPrefetchUrls.get(i),
+                initializationSegment,
+                /* title= */ "",
+                prefetchDurationUs,
+                relativeDiscontinuitySequence,
+                segmentStartTimeUs,
+                cachedDrmInitData,
+                fullSegmentEncryptionKeyUri,
+                prefetchEncryptionIV,
+                /* byteRangeOffset= */ 0,
+                /* byteRangeLength= */ C.LENGTH_UNSET,
+                /* hasGapTag= */ false,
+                /* parts= */ new ArrayList<>()));
+        segmentStartTimeUs += prefetchDurationUs;
       }
     }
 
