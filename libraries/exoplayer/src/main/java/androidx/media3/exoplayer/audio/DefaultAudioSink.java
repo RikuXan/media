@@ -171,9 +171,15 @@ public final class DefaultAudioSink implements AudioSink {
   @SuppressWarnings("deprecation")
   public static class DefaultAudioProcessorChain implements AudioProcessorChain {
 
+    private static volatile boolean pitchFollowsSpeed;
+
     private final AudioProcessor[] audioProcessors;
     private final SilenceSkippingAudioProcessor silenceSkippingAudioProcessor;
     private final SonicAudioProcessor sonicAudioProcessor;
+
+    public static void setPitchFollowsSpeed(boolean enabled) {
+      pitchFollowsSpeed = enabled;
+    }
 
     /**
      * Creates a new default chain of audio processors, with the user-defined {@code
@@ -214,7 +220,9 @@ public final class DefaultAudioSink implements AudioSink {
     @Override
     public PlaybackParameters applyPlaybackParameters(PlaybackParameters playbackParameters) {
       sonicAudioProcessor.setSpeed(playbackParameters.speed);
-      sonicAudioProcessor.setPitch(playbackParameters.pitch);
+      //With pitch == speed Sonic resamples instead of time-stretching, avoiding splice crackle
+      sonicAudioProcessor.setPitch(
+          pitchFollowsSpeed ? playbackParameters.speed : playbackParameters.pitch);
       return playbackParameters;
     }
 
