@@ -119,7 +119,7 @@ public final class HlsMediaSource extends BaseMediaSource
 
     private boolean allowChunklessPreparation;
     private int LowLatency;
-    private int LowLatencyTargetMs;
+    private int LowLatencyTargetMs = -1;
     private boolean speedAdjustment;
     private @MetadataType int metadataType;
     private boolean useSessionKeys;
@@ -793,8 +793,7 @@ public final class HlsMediaSource extends BaseMediaSource
     long targetMs = lowestTargetMs * (segmentLen / 2);
     
     if (LowLatency == 1) {
-    	//Below ~500ms playback stutters, the encoder delivers in bursts that need absorbing
-    	targetMs = LowLatencyTargetMs > 0 ? LowLatencyTargetMs : 1000;
+    	targetMs = LowLatencyTargetMs >= 0 ? LowLatencyTargetMs : 1000;
     } else if (LowLatency > 1) {//live that has low latency enabled, or VOD that the live has not yet ended
     	targetMs = lowestTargetMs * LowLatency;
     }
