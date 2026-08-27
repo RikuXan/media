@@ -42,6 +42,7 @@ import androidx.media3.exoplayer.hls.playlist.DefaultHlsPlaylistParserFactory;
 import androidx.media3.exoplayer.hls.playlist.DefaultHlsPlaylistTracker;
 import androidx.media3.exoplayer.hls.playlist.FilteringHlsPlaylistParserFactory;
 import androidx.media3.exoplayer.hls.playlist.HlsMediaPlaylist;
+import androidx.media3.exoplayer.hls.playlist.HlsMultivariantPlaylist;
 import androidx.media3.exoplayer.hls.playlist.HlsPlaylistParserFactory;
 import androidx.media3.exoplayer.hls.playlist.HlsPlaylistTracker;
 import androidx.media3.exoplayer.source.BaseMediaSource;
@@ -66,11 +67,15 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.Target;
 import java.util.List;
 import java.util.Objects;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** An HLS {@link MediaSource}. */
 @UnstableApi
 public final class HlsMediaSource extends BaseMediaSource
     implements HlsPlaylistTracker.PrimaryPlaylistListener {
+
+  private static final Pattern REGEX_TWITCH_ORIGIN = Pattern.compile("ORIGIN=\"([a-z0-9]+)\"");
 
   static {
     MediaLibraryInfo.registerModule("media3.exoplayer.hls");
@@ -100,6 +105,11 @@ public final class HlsMediaSource extends BaseMediaSource
   /** Type for EMSG metadata in HLS streams. */
   public static final int METADATA_TYPE_EMSG = 3;
 
+  /** Resolves extra live buffer cushion, in ms, for the Twitch origin serving a stream. */
+  public interface OriginCushionProvider {
+    int getOriginCushionExtraMs(@Nullable String originCode);
+  }
+
   /** Factory for {@link HlsMediaSource}s. */
   @SuppressWarnings("deprecation") // Implement deprecated type for backwards compatibility.
   public static final class Factory implements MediaSourceFactory {
@@ -120,6 +130,7 @@ public final class HlsMediaSource extends BaseMediaSource
     private boolean allowChunklessPreparation;
     private int LowLatency;
     private int LowLatencyTargetMs = -1;
+    @Nullable private OriginCushionProvider originCushionProvider;
     private boolean speedAdjustment;
     private @MetadataType int metadataType;
     private boolean useSessionKeys;
@@ -315,6 +326,12 @@ public final class HlsMediaSource extends BaseMediaSource
       return this;
     }
 
+    @CanIgnoreReturnValue
+    public Factory setOriginCushionProvider(@Nullable OriginCushionProvider originCushionProvider) {
+      this.originCushionProvider = originCushionProvider;
+      return this;
+    }
+
     public Factory setLowLatencyTargetMs(int LowLatencyTargetMs) {
       this.LowLatencyTargetMs = LowLatencyTargetMs;
       return this;
@@ -459,6 +476,7 @@ public final class HlsMediaSource extends BaseMediaSource
           allowChunklessPreparation,
           LowLatency,
           LowLatencyTargetMs,
+          originCushionProvider,
           speedAdjustment,
           metadataType,
           useSessionKeys,
@@ -480,6 +498,8 @@ public final class HlsMediaSource extends BaseMediaSource
   private final boolean allowChunklessPreparation;
   private final int LowLatency;
   private final int LowLatencyTargetMs;
+  @Nullable private final OriginCushionProvider originCushionProvider;
+  private int originCushionExtraMs = C.LENGTH_UNSET;
   private final boolean speedAdjustment;
   private final @MetadataType int metadataType;
   private final boolean useSessionKeys;
@@ -509,6 +529,7 @@ public final class HlsMediaSource extends BaseMediaSource
       boolean allowChunklessPreparation,
       int LowLatency,
       int LowLatencyTargetMs,
+      @Nullable OriginCushionProvider originCushionProvider,
       boolean speedAdjustment,
       @MetadataType int metadataType,
       boolean useSessionKeys,
@@ -526,10 +547,33 @@ public final class HlsMediaSource extends BaseMediaSource
     this.allowChunklessPreparation = allowChunklessPreparation;
     this.LowLatency = LowLatency;
     this.LowLatencyTargetMs = LowLatencyTargetMs;
+    this.originCushionProvider = originCushionProvider;
     this.speedAdjustment = speedAdjustment;
     this.metadataType = metadataType;
     this.useSessionKeys = useSessionKeys;
     this.timestampAdjusterInitializationTimeoutMs = timestampAdjusterInitializationTimeoutMs;
+  }
+
+  private int originCushionExtraMs() {
+    if (originCushionProvider == null) {
+      return 0;
+    }
+    if (originCushionExtraMs == C.LENGTH_UNSET) {
+      HlsMultivariantPlaylist multivariantPlaylist = playlistTracker.getMultivariantPlaylist();
+      if (multivariantPlaylist == null) {
+        return 0;
+      }
+      String originCode = null;
+      for (int i = 0; i < multivariantPlaylist.tags.size(); i++) {
+        Matcher matcher = REGEX_TWITCH_ORIGIN.matcher(multivariantPlaylist.tags.get(i));
+        if (matcher.find()) {
+          originCode = matcher.group(1);
+          break;
+        }
+      }
+      originCushionExtraMs = originCushionProvider.getOriginCushionExtraMs(originCode);
+    }
+    return originCushionExtraMs;
   }
 
   @Override
@@ -793,7 +837,7 @@ public final class HlsMediaSource extends BaseMediaSource
     long targetMs = lowestTargetMs * (segmentLen / 2);
     
     if (LowLatency == 1) {
-    	targetMs = LowLatencyTargetMs >= 0 ? LowLatencyTargetMs : 1000;
+    	targetMs = (LowLatencyTargetMs >= 0 ? LowLatencyTargetMs : 1000) + originCushionExtraMs();
     } else if (LowLatency > 1) {//live that has low latency enabled, or VOD that the live has not yet ended
     	targetMs = lowestTargetMs * LowLatency;
     }
