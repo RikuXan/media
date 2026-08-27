@@ -571,7 +571,12 @@ public final class HlsMediaSource extends BaseMediaSource
           break;
         }
       }
-      originCushionExtraMs = originCushionProvider.getOriginCushionExtraMs(originCode);
+      int extraMs = originCushionProvider.getOriginCushionExtraMs(originCode);
+      //A negative answer means the provider cannot resolve the origin yet, ask again next refresh
+      if (extraMs < 0) {
+        return 0;
+      }
+      originCushionExtraMs = extraMs;
     }
     return originCushionExtraMs;
   }
