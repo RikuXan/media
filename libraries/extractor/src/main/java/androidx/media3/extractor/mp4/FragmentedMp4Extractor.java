@@ -1686,7 +1686,8 @@ public class FragmentedMp4Extractor implements Extractor {
 
     Track track = trackBundle.moovSampleTable.track;
     TrackOutput output = trackBundle.output;
-    long sampleTimeUs = trackBundle.getCurrentSamplePresentationTimeUs();
+    long unadjustedSampleTimeUs = trackBundle.getCurrentSamplePresentationTimeUs();
+    long sampleTimeUs = unadjustedSampleTimeUs;
     if (timestampAdjuster != null) {
       sampleTimeUs = timestampAdjuster.adjustSampleTimestamp(sampleTimeUs);
     }
@@ -1808,7 +1809,7 @@ public class FragmentedMp4Extractor implements Extractor {
     output.sampleMetadata(sampleTimeUs, sampleFlags, sampleSize, 0, cryptoData);
 
     // After we have the sampleTimeUs, we can commit all the pending metadata samples
-    outputPendingMetadataSamples(sampleTimeUs);
+    outputPendingMetadataSamples(unadjustedSampleTimeUs);
     if (!trackBundle.next()) {
       currentTrackBundle = null;
     }
