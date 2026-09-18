@@ -1026,8 +1026,31 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer
     return super.isEnded() && (videoSink == null || videoSink.isEnded());
   }
 
+  @Nullable private volatile java.util.function.Consumer<String> readinessDiagnosticListener;
+  @Nullable private Boolean lastDiagnosticReady;
+
+  public void setReadinessDiagnosticListener(java.util.function.Consumer<String> listener) {
+    readinessDiagnosticListener = listener;
+  }
+
   @Override
   public boolean isReady() {
+    boolean ready = isVideoReady();
+    java.util.function.Consumer<String> listener = readinessDiagnosticListener;
+    if (listener != null && (lastDiagnosticReady == null || lastDiagnosticReady != ready)) {
+      lastDiagnosticReady = ready;
+      listener.accept("VIDEO-READINESS rendererId=" + System.identityHashCode(this)
+          + " eventRealtimeMs=" + getClock().elapsedRealtime() + " ready=" + ready
+          + " sourceReady=" + isSourceReady() + " outputAvailable=" + hasOutputBuffer()
+          + " codecPresent=" + (getCodec() != null)
+          + " inputFormatPresent=" + (getCodecInputFormat() != null)
+          + " buffersInCodec=" + buffersInCodecCount
+          + " readingPositionUs=" + getReadingPositionUs());
+    }
+    return ready;
+  }
+
+  private boolean isVideoReady() {
     boolean rendererOtherwiseReady = super.isReady();
     if (videoSink != null) {
       return videoSink.isReady(rendererOtherwiseReady);

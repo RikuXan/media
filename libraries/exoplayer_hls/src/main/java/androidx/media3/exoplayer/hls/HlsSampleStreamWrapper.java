@@ -636,6 +636,12 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
 
   // SampleStream implementation.
 
+  public long getDiagnosticBufferedTimestampUs(int sampleQueueIndex) {
+    if (isPendingReset()) return C.TIME_UNSET;
+    long timestampUs = sampleQueues[sampleQueueIndex].getLargestQueuedTimestampUs();
+    return timestampUs == Long.MIN_VALUE ? C.TIME_UNSET : timestampUs;
+  }
+
   public boolean isReady(int sampleQueueIndex) {
     return !isPendingReset() && sampleQueues[sampleQueueIndex].isReady(loadingFinished);
   }

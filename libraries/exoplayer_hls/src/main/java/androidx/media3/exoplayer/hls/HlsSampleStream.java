@@ -50,6 +50,12 @@ import java.io.IOException;
   // SampleStream implementation.
 
   @Override
+  public long getDiagnosticBufferedTimestampUs() {
+    return hasValidSampleQueueIndex()
+        ? sampleStreamWrapper.getDiagnosticBufferedTimestampUs(sampleQueueIndex) : C.TIME_UNSET;
+  }
+
+  @Override
   public boolean isReady() {
     return sampleQueueIndex == HlsSampleStreamWrapper.SAMPLE_QUEUE_INDEX_NO_MAPPING_NON_FATAL
         || (hasValidSampleQueueIndex() && sampleStreamWrapper.isReady(sampleQueueIndex));
