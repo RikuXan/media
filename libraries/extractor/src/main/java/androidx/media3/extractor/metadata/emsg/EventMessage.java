@@ -92,6 +92,7 @@ public final class EventMessage implements Metadata.Entry {
     switch (schemeIdUri) {
       case ID3_SCHEME_ID_AOM:
       case ID3_SCHEME_ID_APPLE:
+      case "urn:twitch:id3":
         return ID3_FORMAT;
       case SCTE35_SCHEME_ID:
         return SCTE35_FORMAT;
