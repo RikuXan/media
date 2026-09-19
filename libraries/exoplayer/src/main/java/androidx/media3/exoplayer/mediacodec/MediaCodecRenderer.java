@@ -733,6 +733,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
       long offsetUs,
       MediaSource.MediaPeriodId mediaPeriodId)
       throws ExoPlaybackException {
+    resetTrackTiming();
     if (outputStreamInfo.streamOffsetUs == C.TIME_UNSET) {
       // This is the first stream.
       setOutputStreamInfo(
@@ -863,6 +864,59 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
     }
   }
 
+  @Nullable private volatile java.util.function.Consumer<String> trackTimingListener;
+  private long timingLastLogMs = C.TIME_UNSET;
+  private long timingLastInputMs = C.TIME_UNSET;
+  private long timingLastInputUs = C.TIME_UNSET;
+  private long timingLastOutputMs = C.TIME_UNSET;
+  private long timingLastOutputUs = C.TIME_UNSET;
+  private int timingEpoch;
+  private final CodecTimingHistory timingHistory = new CodecTimingHistory();
+  private long timingResidenceMs = -1;
+  private boolean timingSourceReady;
+  private boolean timingOutputAvailable;
+
+  public final void setTrackTimingListener(java.util.function.Consumer<String> listener) {
+    trackTimingListener = listener;
+  }
+
+  private void resetTrackTiming() {
+    timingLastLogMs = timingLastInputMs = timingLastOutputMs = C.TIME_UNSET;
+    timingLastInputUs = timingLastOutputUs = C.TIME_UNSET;
+    timingResidenceMs = -1;
+    timingHistory.reset();
+    timingEpoch++;
+  }
+
+  private void logTrackTiming(long positionUs) {
+    java.util.function.Consumer<String> listener = trackTimingListener;
+    if (listener == null) return;
+    long nowMs = getClock().elapsedRealtime();
+    boolean sourceReady = isSourceReady();
+    boolean outputAvailable = hasOutputBuffer();
+    if (timingLastLogMs != C.TIME_UNSET && nowMs - timingLastLogMs < 500
+        && sourceReady == timingSourceReady && outputAvailable == timingOutputAvailable) return;
+    if (timingLastLogMs != C.TIME_UNSET && nowMs - timingLastLogMs < 100) return;
+    timingLastLogMs = nowMs;
+    timingSourceReady = sourceReady;
+    timingOutputAvailable = outputAvailable;
+    androidx.media3.exoplayer.source.SampleStream stream = getStream();
+    long queuedUs = stream == null ? C.TIME_UNSET : stream.getDiagnosticBufferedTimestampUs();
+    long queuedAheadUs = queuedUs == C.TIME_UNSET ? C.TIME_UNSET
+        : queuedUs + getStreamOffsetUs() - positionUs;
+    listener.accept("TRACK-TIMING rendererId=" + System.identityHashCode(this)
+        + " trackType=" + getTrackType() + " epoch=" + timingEpoch
+        + " eventRealtimeMs=" + nowMs + " rendererPositionUs=" + positionUs
+        + " streamOffsetUs=" + getStreamOffsetUs() + " queuedAheadUs=" + queuedAheadUs
+        + " inputAheadUs=" + (timingLastInputUs == C.TIME_UNSET ? C.TIME_UNSET : timingLastInputUs - positionUs)
+        + " outputAheadUs=" + (timingLastOutputUs == C.TIME_UNSET ? C.TIME_UNSET : timingLastOutputUs - positionUs)
+        + " inputAgeMs=" + (timingLastInputMs == C.TIME_UNSET ? -1 : nowMs - timingLastInputMs)
+        + " outputAgeMs=" + (timingLastOutputMs == C.TIME_UNSET ? -1 : nowMs - timingLastOutputMs)
+        + " codecResidenceMs=" + timingResidenceMs
+        + " sourceReady=" + sourceReady + " outputAvailable=" + outputAvailable
+        + " codecPresent=" + (codec != null) + " bypass=" + bypassEnabled);
+  }
+
   @Override
   public void render(long positionUs, long elapsedRealtimeUs) throws ExoPlaybackException {
     if (pendingOutputEndOfStream) {
@@ -926,6 +980,8 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
         throw createRendererException(exception, inputFormat, isRecoverable, errorCode);
       }
       throw e;
+    } finally {
+      logTrackTiming(positionUs);
     }
   }
 
@@ -1046,6 +1102,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
   /** Resets the renderer internal state after a codec flush. */
   @CallSuper
   protected void resetCodecStateForFlush() {
+    resetTrackTiming();
     resetInputBuffer();
     resetOutputBuffer();
     resetCommonStateForFlush();
@@ -1349,7 +1406,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
         || getClock().elapsedRealtime() - renderStartTimeMs < renderTimeLimitMs;
   }
 
-  private boolean hasOutputBuffer() {
+  protected final boolean hasOutputBuffer() {
     return outputIndex >= 0;
   }
 
@@ -1539,6 +1596,11 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
       handleInputBufferSupplementalData(buffer);
     }
 
+    if (trackTimingListener != null) {
+      timingLastInputUs = buffer.timeUs;
+      timingLastInputMs = getClock().elapsedRealtime();
+      timingHistory.queued(buffer.timeUs, timingLastInputMs);
+    }
     onQueueInputBuffer(buffer);
     int flags = getCodecBufferFlags(buffer);
     if ((SDK_INT < 34 || (flags & MediaCodec.BUFFER_FLAG_DECODE_ONLY) == 0)
@@ -2124,6 +2186,11 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
         return false;
       }
 
+      if (trackTimingListener != null && outputBufferInfo.size > 0) {
+        timingLastOutputUs = outputBufferInfo.presentationTimeUs;
+        timingLastOutputMs = getClock().elapsedRealtime();
+        timingResidenceMs = timingHistory.output(timingLastOutputUs, timingLastOutputMs);
+      }
       // We've dequeued a buffer.
       if (shouldSkipAdaptationWorkaroundOutputBuffer) {
         shouldSkipAdaptationWorkaroundOutputBuffer = false;
