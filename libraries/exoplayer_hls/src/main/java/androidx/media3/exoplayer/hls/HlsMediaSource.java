@@ -119,6 +119,7 @@ public final class HlsMediaSource extends BaseMediaSource
 
     private boolean allowChunklessPreparation;
     private int LowLatency;
+    private int LowLatencyTargetMs = -1;
     private boolean speedAdjustment;
     private @MetadataType int metadataType;
     private boolean useSessionKeys;
@@ -302,11 +303,20 @@ public final class HlsMediaSource extends BaseMediaSource
     
     public Factory setLowLatency(int LowLatency) {
       this.LowLatency = LowLatency;
+      //LowLatency 1 plays Twitch in-progress (prefetch) segments, the parser must emit them
+      if (LowLatency == 1) {
+        this.playlistParserFactory = new DefaultHlsPlaylistParserFactory(true);
+      }
       return this;
     }
     
     public Factory setspeedAdjustment(boolean speedAdjustment) {
       this.speedAdjustment = speedAdjustment;
+      return this;
+    }
+
+    public Factory setLowLatencyTargetMs(int LowLatencyTargetMs) {
+      this.LowLatencyTargetMs = LowLatencyTargetMs;
       return this;
     }
 
@@ -448,6 +458,7 @@ public final class HlsMediaSource extends BaseMediaSource
           elapsedRealTimeOffsetMs,
           allowChunklessPreparation,
           LowLatency,
+          LowLatencyTargetMs,
           speedAdjustment,
           metadataType,
           useSessionKeys,
@@ -468,6 +479,7 @@ public final class HlsMediaSource extends BaseMediaSource
   private final LoadErrorHandlingPolicy loadErrorHandlingPolicy;
   private final boolean allowChunklessPreparation;
   private final int LowLatency;
+  private final int LowLatencyTargetMs;
   private final boolean speedAdjustment;
   private final @MetadataType int metadataType;
   private final boolean useSessionKeys;
@@ -476,6 +488,9 @@ public final class HlsMediaSource extends BaseMediaSource
   private final long timestampAdjusterInitializationTimeoutMs;
 
   private MediaItem.LiveConfiguration liveConfiguration;
+  private long twitchEpochOffsetMs = C.TIME_UNSET;
+  private long lastNewestRealSequence = C.INDEX_UNSET;
+  private long lastRefreshElapsedMs = C.TIME_UNSET;
   @Nullable private TransferListener mediaTransferListener;
 
   @GuardedBy("this")
@@ -493,6 +508,7 @@ public final class HlsMediaSource extends BaseMediaSource
       long elapsedRealTimeOffsetMs,
       boolean allowChunklessPreparation,
       int LowLatency,
+      int LowLatencyTargetMs,
       boolean speedAdjustment,
       @MetadataType int metadataType,
       boolean useSessionKeys,
@@ -509,6 +525,7 @@ public final class HlsMediaSource extends BaseMediaSource
     this.elapsedRealTimeOffsetMs = elapsedRealTimeOffsetMs;
     this.allowChunklessPreparation = allowChunklessPreparation;
     this.LowLatency = LowLatency;
+    this.LowLatencyTargetMs = LowLatencyTargetMs;
     this.speedAdjustment = speedAdjustment;
     this.metadataType = metadataType;
     this.useSessionKeys = useSessionKeys;
@@ -593,6 +610,7 @@ public final class HlsMediaSource extends BaseMediaSource
 
   @Override
   public void onPrimaryPlaylistRefreshed(HlsMediaPlaylist mediaPlaylist) {
+    updateTwitchEpochOffset(mediaPlaylist);
     long windowStartTimeMs =
         mediaPlaylist.hasProgramDateTime ? Util.usToMs(mediaPlaylist.startTimeUs) : C.TIME_UNSET;
     // For playlist types EVENT and VOD we know segments are never removed, so the presentation
@@ -645,7 +663,7 @@ public final class HlsMediaSource extends BaseMediaSource
     return new SinglePeriodTimeline(
         presentationStartTimeMs,
         windowStartTimeMs,
-        /* elapsedRealtimeEpochOffsetMs= */ C.TIME_UNSET,
+        /* elapsedRealtimeEpochOffsetMs= */ twitchEpochOffsetMs,
         periodDurationUs,
         /* windowDurationUs= */ playlist.durationUs,
         /* windowPositionInPeriodUs= */ offsetFromInitialStartTimeUs,
@@ -691,9 +709,56 @@ public final class HlsMediaSource extends BaseMediaSource
         /* liveConfiguration= */ null);
   }
 
+
+  //Twitch stamps the playlist with its server clock, using it keeps the live offset immune to device clock skew.
+  //PROGRAM-DATE-TIME and X-SERVER-TIME can disagree by seconds per stream (transcoder clock skew),
+  //so wall clocks are unusable for the live offset. Instead anchor "now" to the moment the newest
+  //completed segment appeared in a refresh: the offset then measures the distance to the newest
+  //content Twitch has made available, which is observable, stream independent and controllable
+  private void updateTwitchEpochOffset(HlsMediaPlaylist playlist) {
+    if (playlist.hasEndTag || playlist.segments.isEmpty()) return;
+
+    int prefetchCount = 0;
+    for (int i = playlist.tags.size() - 1; i >= 0; i--) {
+      if (playlist.tags.get(i).startsWith("#EXT-X-TWITCH-PREFETCH")) prefetchCount++;
+    }
+
+    int newestRealIndex = playlist.segments.size() - 1 - prefetchCount;
+    if (newestRealIndex < 0) return;
+
+    long nowElapsedMs = SystemClock.elapsedRealtime();
+    long newestSequence = playlist.mediaSequence + newestRealIndex;
+
+    if (newestSequence != lastNewestRealSequence) {
+      lastNewestRealSequence = newestSequence;
+      HlsMediaPlaylist.Segment newest = playlist.segments.get(newestRealIndex);
+      long newestEndUs = playlist.startTimeUs + newest.relativeStartTimeUs + newest.durationUs;
+      //The segment completed somewhere between this refresh and the previous one, the midpoint is
+      //the unbiased estimate, anchoring at discovery undercounts the offset by half a poll interval
+      long completedAtMs = lastRefreshElapsedMs != C.TIME_UNSET && nowElapsedMs - lastRefreshElapsedMs < 3000
+          ? (nowElapsedMs + lastRefreshElapsedMs) / 2
+          : nowElapsedMs;
+      twitchEpochOffsetMs = Util.usToMs(newestEndUs) - completedAtMs;
+    }
+
+    lastRefreshElapsedMs = nowElapsedMs;
+  }
+
+  private static boolean hasTwitchPrefetch(HlsMediaPlaylist playlist) {
+    for (int i = playlist.tags.size() - 1; i >= 0; i--) {
+      if (playlist.tags.get(i).startsWith("#EXT-X-TWITCH-PREFETCH")) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private long getLiveEdgeOffsetUs(HlsMediaPlaylist playlist) {
     return playlist.hasProgramDateTime
-        ? Util.msToUs(Util.getNowUnixTimeMs(elapsedRealTimeOffsetMs)) - playlist.getEndTimeUs()
+        ? Util.msToUs(
+                Util.getNowUnixTimeMs(
+                    twitchEpochOffsetMs != C.TIME_UNSET ? twitchEpochOffsetMs : elapsedRealTimeOffsetMs))
+            - playlist.getEndTimeUs()
         : 0;
   }
 
@@ -710,9 +775,11 @@ public final class HlsMediaSource extends BaseMediaSource
     playlist.targetDurationUs = segments.get(Math.max(0, defaultStartSegmentIndex - 1)).durationUs / 2;
 
     //If LowLatency enable start from #2 segment (from #1 segment may cause rebuffer) else on half of segments
+    //With Twitch prefetch the last segment is still being encoded, starting on it stalls the join
+    int lastSegmentsToSkip = LowLatency == 1 && hasTwitchPrefetch(playlist) ? 2 : LowLatency;
     defaultStartSegmentIndex = Math.max(
         0,
-        LowLatency > 0 ? (defaultStartSegmentIndex - LowLatency) : (defaultStartSegmentIndex / 2)
+        LowLatency > 0 ? (defaultStartSegmentIndex - lastSegmentsToSkip) : (defaultStartSegmentIndex / 2)
     );
 
     return segments.get(defaultStartSegmentIndex).relativeStartTimeUs;
@@ -726,7 +793,7 @@ public final class HlsMediaSource extends BaseMediaSource
     long targetMs = lowestTargetMs * (segmentLen / 2);
     
     if (LowLatency == 1) {
-    	targetMs = lowestTargetMs + 250;//lowest then this and we get too much rebuffers
+    	targetMs = LowLatencyTargetMs >= 0 ? LowLatencyTargetMs : 1000;
     } else if (LowLatency > 1) {//live that has low latency enabled, or VOD that the live has not yet ended
     	targetMs = lowestTargetMs * LowLatency;
     }
@@ -734,8 +801,12 @@ public final class HlsMediaSource extends BaseMediaSource
     liveConfiguration =
         new LiveConfiguration.Builder()
             .setTargetOffsetMs(targetMs)
-            .setMinPlaybackSpeed(speedAdjustment && LowLatency > 0 ? 0.99f : 1f)
-            .setMaxPlaybackSpeed(speedAdjustment && LowLatency > 0 ? 1.01f : 1f)
+            //Cap the target offset the speed control may ratchet up to, or latency grows unbounded over time.
+            //The band above the floor is where per-stall easing may retreat to on streams with a slow pipeline
+            .setMaxOffsetMs(targetMs + (LowLatency == 1 ? 1500 : lowestTargetMs))
+            //A slowdown below 1f is only safe because of the cap above, an uncapped target made latency grow
+            .setMinPlaybackSpeed(speedAdjustment && LowLatency == 1 ? 0.97f : 1f)
+            .setMaxPlaybackSpeed(speedAdjustment && LowLatency > 0 ? 1.05f : 1f)
             .build();
   }
 
