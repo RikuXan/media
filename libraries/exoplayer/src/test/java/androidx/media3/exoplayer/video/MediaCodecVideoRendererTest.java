@@ -3513,6 +3513,75 @@ public class MediaCodecVideoRendererTest {
     mediaCodecVideoRenderer.resetPosition(positionUs);
   }
 
+  @Test
+  public void isReady_withOutputGapGrace_staysReadyUntilGraceExpires() throws Exception {
+    mediaCodecVideoRenderer.setOutputGapGraceMs(100);
+    FakeSampleStream fakeSampleStream = renderAllFramesOfThreeSampleStream();
+    queueUndecodedFrame(fakeSampleStream);
+
+    assertThat(mediaCodecVideoRenderer.isReady()).isTrue();
+    ShadowSystemClock.advanceBy(101, TimeUnit.MILLISECONDS);
+    assertThat(mediaCodecVideoRenderer.isReady()).isFalse();
+  }
+
+  @Test
+  public void isReady_withoutOutputGapGrace_isNotReadyWhileFrameIsStillDecoding() throws Exception {
+    FakeSampleStream fakeSampleStream = renderAllFramesOfThreeSampleStream();
+    queueUndecodedFrame(fakeSampleStream);
+
+    assertThat(mediaCodecVideoRenderer.isReady()).isFalse();
+  }
+
+  @Test
+  public void isReady_withOutputGapGrace_isNotReadyOnceCodecHoldsNoFrames() throws Exception {
+    mediaCodecVideoRenderer.setOutputGapGraceMs(100);
+    renderAllFramesOfThreeSampleStream();
+
+    assertThat(mediaCodecVideoRenderer.isReady()).isFalse();
+  }
+
+  private FakeSampleStream renderAllFramesOfThreeSampleStream() throws Exception {
+    FakeSampleStream fakeSampleStream =
+        new FakeSampleStream(
+            new DefaultAllocator(/* trimOnReset= */ true, /* individualAllocationSize= */ 1024),
+            /* mediaSourceEventDispatcher= */ null,
+            DrmSessionManager.DRM_UNSUPPORTED,
+            new DrmSessionEventListener.EventDispatcher(),
+            /* initialFormat= */ VIDEO_H264,
+            ImmutableList.of(
+                oneByteSample(/* timeUs= */ 0, C.BUFFER_FLAG_KEY_FRAME),
+                oneByteSample(/* timeUs= */ 10_000),
+                oneByteSample(/* timeUs= */ 20_000)));
+    fakeSampleStream.writeData(/* startPositionUs= */ 0);
+    mediaCodecVideoRenderer.enable(
+        RendererConfiguration.DEFAULT,
+        new Format[] {VIDEO_H264},
+        fakeSampleStream,
+        /* positionUs= */ 0,
+        /* joining= */ false,
+        /* mayRenderStartOfStream= */ true,
+        /* startPositionUs= */ 0,
+        /* offsetUs= */ 0,
+        /* mediaPeriodId= */ new MediaSource.MediaPeriodId(new Object()));
+    mediaCodecVideoRenderer.start();
+    for (int i = 0; i < 10; i++) {
+      mediaCodecVideoRenderer.render(
+          /* positionUs= */ Math.min(20_000, i * 10_000L), SystemClock.elapsedRealtime() * 1000);
+      codecAdapterFactory.idleQueueingAndCallbackThreads();
+      if (i == 0) {
+        // Past the codec hotswap window, which would otherwise keep the renderer ready.
+        ShadowSystemClock.advanceBy(1_001, TimeUnit.MILLISECONDS);
+      }
+    }
+    return fakeSampleStream;
+  }
+
+  private void queueUndecodedFrame(FakeSampleStream fakeSampleStream) throws Exception {
+    fakeSampleStream.append(ImmutableList.of(oneByteSample(/* timeUs= */ 30_000)));
+    fakeSampleStream.writeData(/* startPositionUs= */ 0);
+    mediaCodecVideoRenderer.render(/* positionUs= */ 20_000, SystemClock.elapsedRealtime() * 1000);
+  }
+
   private static CodecCapabilities createCodecCapabilities(int profile, int level) {
     CodecCapabilities capabilities = new CodecCapabilities();
     capabilities.profileLevels = new CodecProfileLevel[] {createCodecProfileLevel(profile, level)};
