@@ -880,6 +880,19 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
     trackTimingListener = listener;
   }
 
+  // Playback thread only: the renderer's stream and reading position are unsynchronized.
+  public final long getUnreadQueuedDurationUs() {
+    SampleStream stream = getStream();
+    long queuedUs = stream == null ? C.TIME_UNSET : stream.getDiagnosticBufferedTimestampUs();
+    long readingPositionUs = getReadingPositionUs();
+    if (queuedUs == C.TIME_UNSET
+        || readingPositionUs == C.TIME_UNSET
+        || readingPositionUs == C.TIME_END_OF_SOURCE) {
+      return C.TIME_UNSET;
+    }
+    return queuedUs + getStreamOffsetUs() - readingPositionUs;
+  }
+
   private void resetTrackTiming() {
     timingLastLogMs = timingLastInputMs = timingLastOutputMs = C.TIME_UNSET;
     timingLastInputUs = timingLastOutputUs = C.TIME_UNSET;
