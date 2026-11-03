@@ -1028,9 +1028,16 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer
 
   @Nullable private volatile java.util.function.Consumer<String> readinessDiagnosticListener;
   @Nullable private Boolean lastDiagnosticReady;
+  private volatile long outputGapGraceMs;
+  private long lastProcessedOutputRealtimeMs = C.TIME_UNSET;
+  private long outputGapStartRealtimeMs = C.TIME_UNSET;
 
   public void setReadinessDiagnosticListener(java.util.function.Consumer<String> listener) {
     readinessDiagnosticListener = listener;
+  }
+
+  public void setOutputGapGraceMs(long outputGapGraceMs) {
+    this.outputGapGraceMs = outputGapGraceMs;
   }
 
   @Override
@@ -1052,6 +1059,14 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer
 
   private boolean isVideoReady() {
     boolean rendererOtherwiseReady = super.isReady();
+    if (!rendererOtherwiseReady && isWithinOutputGapGrace()) {
+      if (outputGapStartRealtimeMs == C.TIME_UNSET) {
+        outputGapStartRealtimeMs = getClock().elapsedRealtime();
+      }
+      rendererOtherwiseReady = true;
+    } else if (outputGapStartRealtimeMs != C.TIME_UNSET) {
+      endOutputGap(/* resumed= */ rendererOtherwiseReady);
+    }
     if (videoSink != null) {
       return videoSink.isReady(rendererOtherwiseReady);
     }
@@ -1060,6 +1075,27 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer
       return true;
     }
     return videoFrameReleaseControl.isReady(rendererOtherwiseReady);
+  }
+
+  private boolean isWithinOutputGapGrace() {
+    return outputGapGraceMs > 0
+        && getCodec() != null
+        && buffersInCodecCount > 0
+        && lastProcessedOutputRealtimeMs != C.TIME_UNSET
+        && getClock().elapsedRealtime() - lastProcessedOutputRealtimeMs < outputGapGraceMs;
+  }
+
+  private void endOutputGap(boolean resumed) {
+    java.util.function.Consumer<String> listener = readinessDiagnosticListener;
+    if (listener != null) {
+      long nowMs = getClock().elapsedRealtime();
+      listener.accept("VIDEO-OUTPUT-GRACE rendererId=" + System.identityHashCode(this)
+          + " eventRealtimeMs=" + nowMs + " durationMs=" + (nowMs - outputGapStartRealtimeMs)
+          + " outcome=" + (resumed ? "resumed" : "expired")
+          + " sourceReady=" + isSourceReady() + " outputAvailable=" + hasOutputBuffer()
+          + " buffersInCodec=" + buffersInCodecCount);
+    }
+    outputGapStartRealtimeMs = C.TIME_UNSET;
   }
 
   @Override
@@ -1343,6 +1379,8 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer
     super.resetCodecStateForFlush();
     droppedDecoderInputBufferTimestamps.clear();
     buffersInCodecCount = 0;
+    lastProcessedOutputRealtimeMs = C.TIME_UNSET;
+    outputGapStartRealtimeMs = C.TIME_UNSET;
     consecutiveDroppedInputBufferCount = 0;
     isFlushRequired = false;
     if (av1SampleDependencyParser != null) {
@@ -1953,6 +1991,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer
     super.onProcessedOutputBuffer(presentationTimeUs);
     if (!tunneling) {
       buffersInCodecCount--;
+      lastProcessedOutputRealtimeMs = getClock().elapsedRealtime();
     }
   }
 
