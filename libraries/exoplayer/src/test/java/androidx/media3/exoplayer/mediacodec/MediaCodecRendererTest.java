@@ -661,6 +661,65 @@ public class MediaCodecRendererTest {
     assertThat(playbackException).hasCauseThat().hasMessageThat().contains("Test exception");
   }
 
+  @Test
+  public void getUnreadQueuedDurationUs_excludesSamplesTheRendererAlreadyRead() throws Exception {
+    Format format =
+        new Format.Builder().setSampleMimeType(MimeTypes.AUDIO_AAC).setAverageBitrate(1000).build();
+    long offsetUs = 1_000_000;
+    FakeSampleStream fakeSampleStream =
+        new FakeSampleStream(
+            new DefaultAllocator(/* trimOnReset= */ true, /* individualAllocationSize= */ 1024),
+            /* mediaSourceEventDispatcher= */ null,
+            DrmSessionManager.DRM_UNSUPPORTED,
+            new DrmSessionEventListener.EventDispatcher(),
+            /* initialFormat= */ format,
+            ImmutableList.of(
+                oneByteSample(/* timeUs= */ 0, C.BUFFER_FLAG_KEY_FRAME),
+                oneByteSample(/* timeUs= */ 100, C.BUFFER_FLAG_KEY_FRAME),
+                oneByteSample(/* timeUs= */ 200, C.BUFFER_FLAG_KEY_FRAME),
+                oneByteSample(/* timeUs= */ 500, C.BUFFER_FLAG_KEY_FRAME))) {
+          @Override
+          public long getDiagnosticBufferedTimestampUs() {
+            return getLargestQueuedTimestampUs();
+          }
+        };
+    fakeSampleStream.writeData(/* startPositionUs= */ 0);
+    MediaCodecRenderer renderer = new TestRenderer();
+    renderer.init(/* index= */ 0, PlayerId.UNSET, Clock.DEFAULT);
+
+    assertThat(renderer.getUnreadQueuedDurationUs()).isEqualTo(C.TIME_UNSET);
+
+    renderer.enable(
+        RendererConfiguration.DEFAULT,
+        new Format[] {format},
+        fakeSampleStream,
+        /* positionUs= */ offsetUs,
+        /* joining= */ false,
+        /* mayRenderStartOfStream= */ true,
+        /* startPositionUs= */ offsetUs,
+        offsetUs,
+        new MediaSource.MediaPeriodId(new Object()));
+    assertThat(renderer.getUnreadQueuedDurationUs()).isEqualTo(500);
+
+    renderer.start();
+    long positionUs = offsetUs;
+    while (renderer.getReadingPositionUs() - offsetUs < 100) {
+      renderer.render(positionUs, SystemClock.elapsedRealtime());
+    }
+    long readUs = renderer.getReadingPositionUs() - offsetUs;
+    assertThat(renderer.getUnreadQueuedDurationUs()).isAtMost(400);
+    assertThat(renderer.getUnreadQueuedDurationUs()).isEqualTo(500 - readUs);
+
+    fakeSampleStream.append(ImmutableList.of(END_OF_STREAM_ITEM));
+    fakeSampleStream.writeData(/* startPositionUs= */ 0);
+    renderer.setCurrentStreamFinal();
+    while (!renderer.hasReadStreamToEnd()) {
+      positionUs += 100;
+      renderer.render(positionUs, SystemClock.elapsedRealtime());
+    }
+    assertThat(renderer.getUnreadQueuedDurationUs()).isEqualTo(C.TIME_UNSET);
+  }
+
   private FakeSampleStream createFakeSampleStream(Format format, long... sampleTimesUs) {
     ImmutableList.Builder<FakeSampleStream.FakeSampleStreamItem> sampleListBuilder =
         ImmutableList.builder();
